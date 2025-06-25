@@ -7,12 +7,15 @@ import {
   StyleSheet,
   Image,
   ActivityIndicator,
-  RefreshControl
+  RefreshControl,
+  Alert
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 import io from 'socket.io-client';
 
-const API_URL = 'http://192.168.1.64:3000'; // Replace with your actual backend URL
+const API_URL = 'http://192.168.1.64:3000';
 const socket = io(API_URL, {
   transports: ['websocket'],
   path: '/api/socketio'
@@ -23,10 +26,10 @@ const ChatListScreen = () => {
   const [chatRooms, setChatRooms] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const userId = '1'; // Replace with actual user ID from your auth system
+  const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
-    fetchChatRooms();
+    checkCurrentUser();
     setupSocketListeners();
 
     return () => {
@@ -34,6 +37,81 @@ const ChatListScreen = () => {
       socket.off('receive_message');
     };
   }, []);
+
+  const checkCurrentUser = async () => {
+    try {
+      const userId = await AsyncStorage.getItem('currentUserId');
+      const userName = await AsyncStorage.getItem('currentUserName');
+      const userImage = await AsyncStorage.getItem('currentUserImage');
+
+      if (!userId) {
+        navigation.replace('UserSelection');
+        return;
+      }
+
+      setCurrentUser({
+        id: userId,
+        name: userName,
+        image: userImage
+      });
+
+      // Set up header buttons
+      navigation.setOptions({
+        headerLeft: () => (
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={handleUserSwitch}
+          >
+            <Image
+              source={{ uri: userImage || 'https://via.placeholder.com/30' }}
+              style={styles.headerAvatar}
+            />
+            <Text style={styles.headerUserName}>{userName}</Text>
+          </TouchableOpacity>
+        ),
+        headerRight: () => (
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => navigation.navigate('CreateChatRoom')}
+          >
+            <Ionicons name="create-outline" size={24} color="#007AFF" />
+          </TouchableOpacity>
+        )
+      });
+
+      fetchChatRooms(userId);
+    } catch (error) {
+      console.error('Error checking current user:', error);
+      navigation.replace('UserSelection');
+    }
+  };
+
+  const handleUserSwitch = () => {
+    Alert.alert(
+      'Switch User',
+      'Do you want to switch to a different user?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel'
+        },
+        {
+          text: 'Switch',
+          onPress: async () => {
+            try {
+              await AsyncStorage.removeItem('currentUserId');
+              await AsyncStorage.removeItem('currentUserName');
+              await AsyncStorage.removeItem('currentUserImage');
+              navigation.replace('UserSelection');
+            } catch (error) {
+              console.error('Error switching user:', error);
+              Alert.alert('Error', 'Failed to switch user. Please try again.');
+            }
+          }
+        }
+      ]
+    );
+  };
 
   const setupSocketListeners = () => {
     socket.on('new_chat_room', (newRoom) => {
@@ -46,7 +124,6 @@ const ChatListScreen = () => {
         const roomIndex = updatedRooms.findIndex(room => room.id === message.roomId);
         if (roomIndex !== -1) {
           updatedRooms[roomIndex].messages = [message];
-          // Move the updated room to the top
           const [updatedRoom] = updatedRooms.splice(roomIndex, 1);
           updatedRooms.unshift(updatedRoom);
         }
@@ -55,7 +132,7 @@ const ChatListScreen = () => {
     });
   };
 
-  const fetchChatRooms = async () => {
+  const fetchChatRooms = async (userId) => {
     try {
       const response = await fetch(`${API_URL}/Chat/GetRooms`, {
         headers: {
@@ -68,6 +145,7 @@ const ChatListScreen = () => {
       }
     } catch (error) {
       console.error('Error fetching chat rooms:', error);
+      Alert.alert('Error', 'Failed to fetch chat rooms. Please try again.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -76,16 +154,18 @@ const ChatListScreen = () => {
 
   const onRefresh = () => {
     setRefreshing(true);
-    fetchChatRooms();
+    if (currentUser) {
+      fetchChatRooms(currentUser.id);
+    }
   };
 
   const navigateToChatRoom = (room) => {
-    navigation.navigate('ChatRoom', { room, userId });
+    navigation.navigate('ChatRoom', { room, userId: currentUser.id });
   };
 
   const renderChatRoom = ({ item: room }) => {
     const lastMessage = room.messages[0]?.content || 'No messages yet';
-    const otherParticipants = room.participants.filter(p => p.id !== userId);
+    const otherParticipants = room.participants.filter(p => p.id !== currentUser?.id);
     const roomName = room.name || otherParticipants.map(p => p.name).join(', ');
 
     return (
@@ -113,7 +193,7 @@ const ChatListScreen = () => {
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#0000ff" />
+        <ActivityIndicator size="large" color="#007AFF" />
       </View>
     );
   }
@@ -146,6 +226,23 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  headerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 15,
+    padding: 5,
+  },
+  headerAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    marginRight: 8,
+  },
+  headerUserName: {
+    fontSize: 16,
+    color: '#007AFF',
+    fontWeight: '500',
   },
   roomItem: {
     flexDirection: 'row',

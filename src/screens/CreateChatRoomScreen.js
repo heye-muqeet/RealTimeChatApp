@@ -8,9 +8,11 @@ import {
   FlatList,
   Image,
   ActivityIndicator,
-  RefreshControl
+  RefreshControl,
+  Alert
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API_URL = 'http://192.168.1.64:3000'; // Replace with your actual backend URL
 
@@ -18,43 +20,78 @@ const CreateChatRoomScreen = () => {
   const navigation = useNavigation();
   const [roomName, setRoomName] = useState('');
   const [selectedUsers, setSelectedUsers] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const userId = '1'; // Replace with actual user ID from your auth system
+  const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
   const [users, setUsers] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const fetchUsers = async () => {
+  useEffect(() => {
+    checkCurrentUser();
+  }, []);
+
+  const checkCurrentUser = async () => {
+    try {
+      const userId = await AsyncStorage.getItem('currentUserId');
+      const userName = await AsyncStorage.getItem('currentUserName');
+      
+      if (!userId) {
+        navigation.replace('UserSelection');
+        return;
+      }
+
+      setCurrentUser({
+        id: userId,
+        name: userName
+      });
+
+      fetchUsers(userId);
+    } catch (error) {
+      console.error('Error checking current user:', error);
+      Alert.alert('Error', 'Failed to get current user. Please try again.');
+      navigation.goBack();
+    }
+  };
+
+  const fetchUsers = async (currentUserId) => {
     try {
       const response = await fetch(`${API_URL}/Chat/GetUsers`, {
         headers: {
-          'user-id': userId
+          'user-id': currentUserId
         }
       });
       const data = await response.json();
       if (data.success) {
-        setUsers(data.data);
+        // Filter out the current user from the list
+        const otherUsers = data.data.filter(user => user.id !== currentUserId);
+        setUsers(otherUsers);
+      } else {
+        Alert.alert('Error', 'Failed to fetch users');
       }
     } catch (error) {
       console.error('Error fetching users:', error);
-      alert('Failed to fetch users');
+      Alert.alert('Error', 'Failed to fetch users');
     } finally {
+      setLoading(false);
       setRefreshing(false);
     }
   };
 
-  useEffect(() => {
-    fetchUsers();
-  }, []);
-
   const onRefresh = () => {
     setRefreshing(true);
-    fetchUsers();
+    if (currentUser) {
+      fetchUsers(currentUser.id);
+    }
   };
 
   const createRoom = async () => {
+    if (!currentUser) {
+      Alert.alert('Error', 'No user selected');
+      return;
+    }
+
     if (!selectedUsers.length) {
-      alert('Please select at least one user');
+      Alert.alert('Error', 'Please select at least one user');
       return;
     }
 
@@ -67,19 +104,22 @@ const CreateChatRoomScreen = () => {
         },
         body: JSON.stringify({
           name: roomName.trim() || undefined,
-          participantIds: [...selectedUsers.map(u => u.id), userId]
+          participantIds: [...selectedUsers.map(u => u.id), currentUser.id]
         })
       });
 
       const data = await response.json();
       if (data.success) {
-        navigation.navigate('ChatRoom', { room: data.data });
+        navigation.navigate('ChatRoom', { 
+          room: data.data,
+          userId: currentUser.id
+        });
       } else {
-        alert('Failed to create chat room');
+        Alert.alert('Error', 'Failed to create chat room');
       }
     } catch (error) {
       console.error('Error creating chat room:', error);
-      alert('Failed to create chat room');
+      Alert.alert('Error', 'Failed to create chat room');
     } finally {
       setLoading(false);
     }
@@ -112,7 +152,7 @@ const CreateChatRoomScreen = () => {
         <Image
           source={{
             uri: user.image || 'https://via.placeholder.com/40'
-          }}
+          }}  
           style={styles.userAvatar}
         />
         <View style={styles.userInfo}>
@@ -131,7 +171,7 @@ const CreateChatRoomScreen = () => {
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#0000ff" />
+        <ActivityIndicator size="large" color="#007AFF" />
       </View>
     );
   }

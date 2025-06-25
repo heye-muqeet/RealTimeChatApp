@@ -9,16 +9,46 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
-  Image
+  Image,
+  Alert
 } from 'react-native';
 import { useRoute } from '@react-navigation/native';
 import io from 'socket.io-client';
 
-const API_URL = 'http://192.168.1.64:3000'; // Replace with your actual backend URL
-const socket = io(API_URL, {
-  transports: ['websocket'],
-  path: '/api/socketio'
-});
+const API_URL = 'http://192.168.1.64:3000';
+
+let socket;
+try {
+  socket = io(API_URL, {
+    transports: ['websocket'],
+    path: '/api/socketio',
+    reconnection: true,
+    reconnectionAttempts: 5,	
+    reconnectionDelay: 1000,
+    timeout: 10000,
+    forceNew: true
+  });
+
+  socket.on('connect_error', (error) => {
+    console.error('Socket connection error:', error);
+    Alert.alert(
+      'Connection Error',
+      'Failed to connect to chat server. Please check your internet connection and try again.',
+      [{ text: 'OK' }]
+    );
+  });
+
+  socket.on('connect', () => {
+    console.log('Socket connected successfully');
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log('Socket disconnected:', reason);
+  });
+
+} catch (error) {
+  console.error('Socket initialization error:', error);
+}
 
 const ChatRoomScreen = () => {
   const route = useRoute();
@@ -26,6 +56,7 @@ const ChatRoomScreen = () => {
   const [messages, setMessages] = useState([]);
   const [messageText, setMessageText] = useState('');
   const [loading, setLoading] = useState(true);
+  const [socketConnected, setSocketConnected] = useState(false);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -34,36 +65,75 @@ const ChatRoomScreen = () => {
   const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
-    fetchMessages();
-    socket.emit('join_room', room.id);
+    // Check socket connection
+    const checkConnection = () => {
+      const isConnected = socket?.connected;
+      console.log('Socket connection status:', isConnected);
+      setSocketConnected(isConnected);
+      
+      if (!isConnected && socket) {
+        console.log('Attempting to reconnect...');
+        socket.connect();
+      }
+    };
 
+    checkConnection();
+    const connectionInterval = setInterval(checkConnection, 5000);
+
+    // Join room
+    if (socket?.connected) {
+      console.log('Joining room:', room.id);
+      socket.emit('join_room', room.id);
+    }
+
+    fetchMessages();
     setupSocketListeners();
 
     return () => {
-      socket.emit('leave_room', room.id);
-      socket.off('receive_message');
-      socket.off('user_typing');
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
+      clearInterval(connectionInterval);
+      if (socket?.connected) {
+        console.log('Leaving room:', room.id);
+        socket.emit('leave_room', room.id);
       }
+      cleanup();
     };
   }, []);
 
+  const cleanup = () => {
+    if (socket) {
+      socket.off('receive_message');
+      socket.off('user_typing');
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('connect_error');
+    }
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+  };
+
   const setupSocketListeners = () => {
+    if (!socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
     socket.on('receive_message', (newMessage) => {
+      console.log('Received message:', newMessage);
       if (newMessage.roomId === room.id) {
         setMessages(prev => [newMessage, ...prev]);
         flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
       }
     });
 
-    socket.on('user_typing', ({ userId, isTyping }) => {
+    socket.on('user_typing', ({ userId: typingUserId, isTyping }) => {
+      console.log('User typing status:', { typingUserId, isTyping });
       setTypingUsers(prev => {
         const newSet = new Set(prev);
         if (isTyping) {
-          newSet.add(userId);
+          newSet.add(typingUserId);
         } else {
-          newSet.delete(userId);
+          newSet.delete(typingUserId);
         }
         return newSet;
       });
@@ -102,36 +172,65 @@ const ChatRoomScreen = () => {
   };
 
   const sendMessage = () => {
-    if (messageText.trim()) {
+    if (!socket?.connected) {
+      Alert.alert(
+        'Connection Error',
+        'Not connected to chat server. Please wait while we try to reconnect.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    const trimmedMessage = messageText.trim();
+    if (trimmedMessage) {
+      console.log('Sending message:', {
+        roomId: room.id,
+        senderId: userId,
+        message: trimmedMessage
+      });
+      
+      // Clear the input immediately for better UX
+      setMessageText('');
+      
       socket.emit('send_message', {
         roomId: room.id,
         senderId: userId,
-        message: messageText.trim()
+        message: trimmedMessage
+      }, (acknowledgement) => {
+        if (acknowledgement?.error) {
+          console.error('Message send error:', acknowledgement.error);
+          Alert.alert('Error', 'Failed to send message. Please try again.');
+          // Restore the message text if sending failed
+          setMessageText(trimmedMessage);
+        } else {
+          console.log('Message sent successfully');
+        }
       });
-      setMessageText('');
     }
   };
 
   const handleTyping = (text) => {
     setMessageText(text);
 
-    socket.emit('typing', {
-      roomId: room.id,
-      userId,
-      isTyping: text.length > 0
-    });
-
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
-
-    typingTimeoutRef.current = setTimeout(() => {
+    if (socket?.connected) {
       socket.emit('typing', {
         roomId: room.id,
         userId,
-        isTyping: false
+        isTyping: text.length > 0
       });
-    }, 1000);
+
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+
+      typingTimeoutRef.current = setTimeout(() => {
+        socket.emit('typing', {
+          roomId: room.id,
+          userId,
+          isTyping: false
+        });
+      }, 1000);
+    }
   };
 
   const renderMessage = ({ item: message }) => {
